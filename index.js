@@ -64,16 +64,19 @@ async function startServer() {
 
 // A flag to prevent spamming the start command if multiple players ping at once.
 let isStarting = false;
+let startTime = null; // New variable to track when the server started attempting to boot.
 
 // --- Minecraft Ping Listener ---
 const server = mc.createServer({
     'online-mode': false,
     encryption: false,
     host: '0.0.0.0',
-    port: parseInt(LISTEN_PORT),
-    version: '1.20.1', // Use a common version for broad compatibility.
-    motd: 'CraftOnDemand Proxy'
+    port: parseInt(LISTEN_PORT), // Listen on the configured port
+    version: false, // Allow players from any Minecraft version to join (ViaVersion compatibility)
+    motd: 'CraftOnDemand Proxy\n§cServer is offline, join to start it.' // Default MOTD for non-running states
 });
+
+// Note: For persistent startTime across application restarts, consider using a simple file-based storage or a database.
 
 console.log(`[CraftOnDemand] Listening for Minecraft pings on port ${LISTEN_PORT}...`);
 
@@ -86,27 +89,38 @@ server.on('login', async (client) => {
     let response = {
         version: { name: 'CraftOnDemand', protocol: client.protocolVersion },
         players: { max: 20, online: 0, sample: [] },
-        description: { text: 'Pinging server...' }
+        description: { text: 'CraftOnDemand Proxy\n§cServer is offline, join to start it.' } // Default MOTD
     };
 
     switch (status) {
         case 'offline':
             if (!isStarting) {
                 isStarting = true;
+                startTime = Date.now(); // Record when the start command was sent
                 console.log('[Server] Server is offline. Attempting to start...');
                 await startServer();
-                response.description.text = '§eServer is starting up!\n§7Please refresh in a moment.';
+                response.description.text = '§eServer is starting up!\n§aThe start command has been sent. Please refresh in a moment.';
                 // Reset the flag after a cooldown to allow another start attempt if it fails.
                 setTimeout(() => { isStarting = false; }, 30000); // 30-second cooldown.
             } else {
-                console.log('[Server] Start command already sent recently. Waiting...');
-                response.description.text = '§6Server is starting up!\n§7Please wait...';
+                const minutesAgo = startTime ? Math.floor((Date.now() - startTime) / (1000 * 60)) : 0;
+                if (minutesAgo > 0) {
+                    response.description.text = `§6Server is already starting. Please wait. (Started ${minutesAgo} minutes ago)\n§7Please refresh in a moment.`;
+                } else {
+                    // Fallback if startTime is somehow not set or very recent
+                    response.description.text = '§6Server is already starting. Please wait.\n§7Please refresh in a moment.';
+                }
             }
             break;
 
         case 'starting':
             isStarting = true; // Ensure flag is set if we catch it in this state.
-            response.description.text = '§6Server is starting...\n§7Almost there!';
+            // If startTime is not set (e.g., app restarted while server was starting), initialize it.
+            if (!startTime) {
+                startTime = Date.now();
+            }
+            const minutesStarting = Math.floor((Date.now() - startTime) / (1000 * 60));
+            response.description.text = `§6Server is starting...\n§7Almost there! (Starting for ${minutesStarting} minutes)`;
             break;
 
         case 'stopping':
