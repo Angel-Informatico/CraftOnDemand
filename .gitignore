@@ -404,3 +404,11 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Environment files for Node.js
+.env
+.env.*
+
+# Node.js lock files
+package-lock.json
+yarn.lock
