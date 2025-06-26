@@ -1,0 +1,22 @@
+{
+  "name": "CraftOnDemand",
+  "version": "1.0.0",
+  "description": "Automatically start your Pterodactyl-hosted Minecraft server when a player tries to join.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "minecraft",
+    "pterodactyl",
+    "automation",
+    "on-demand"
+  ],
+  "author": "Ángel Dev",
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "axios": "^1.6.8",
+    "dotenv": "^16.4.5",
+    "minecraft-protocol": "^1.47.0"
+  }
+}
