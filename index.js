@@ -12,7 +12,10 @@ const {
     MINECRAFT_SERVER_PORT
 } = process.env;
 
-// Parse the online-mode setting from .env, defaulting to true (premium mode)
+// Parse the online-mode setting from .env, defaulting to true (premium mode).
+// This specific variable (IS_ONLINE_MODE) is not actively used in the current proxy logic
+// for packet forwarding, but is kept for potential future use or if the real server's
+// online-mode status needs to be known by the proxy. The proxy itself operates in 'offline-mode'.
 const IS_ONLINE_MODE = (process.env.MINECRAFT_SERVER_ONLINE_MODE || 'true') === 'true';
 
 const requiredVars = ['LISTEN_PORT', 'PTERO_HOST', 'PTERO_API_KEY', 'PTERO_SERVER_ID', 'MINECRAFT_SERVER_HOST', 'MINECRAFT_SERVER_PORT'];
@@ -45,7 +48,7 @@ async function getServerStatus() {
     } catch (error) {
         const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
         console.error(`[Pterodactyl] Error fetching server status: ${errorMessage}`);
-        return 'error';
+        return 'error'; // Indicates an issue fetching status
     }
 }
 
@@ -56,124 +59,168 @@ async function getServerStatus() {
 async function startServer() {
     try {
         await pteroClient.post(`/api/client/servers/${PTERO_SERVER_ID}/power`, { signal: 'start' });
-        console.log(`[Pterodactyl] Start command sent successfully.`);
+        console.log(`[Pterodactyl] Start command sent successfully to server ${PTERO_SERVER_ID}.`);
         return true;
     } catch (error) {
         const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
-        console.error(`[Pterodactyl] Error sending start command: ${errorMessage}`);
+        console.error(`[Pterodactyl] Error sending start command to server ${PTERO_SERVER_ID}: ${errorMessage}`);
         return false;
     }
 }
 
-// A flag to prevent spamming the start command if multiple players ping at once.
+// A flag to prevent multiple start commands if several players attempt to join simultaneously.
 let isStarting = false;
-let startTime = null; // Tracks when the server started attempting to boot.
+let startTime = null; // Tracks when the server began its start-up sequence.
 
-// --- Minecraft Ping Listener ---
+// --- Minecraft Proxy Server ---
 const server = mc.createServer({
-    'online-mode': false, // This is for the proxy itself, not the connection to the real server
-    encryption: false,
-    host: '0.0.0.0',
+    'online-mode': false, // The proxy operates in offline mode to handle initial connections.
+    encryption: false,    // Encryption is typically handled by the backend Minecraft server.
+    host: '0.0.0.0',      // Listen on all available network interfaces.
     port: parseInt(LISTEN_PORT),
-    version: false, // Allow players from any Minecraft version to join (ViaVersion compatibility)
+    version: false,       // Allow clients of any Minecraft version to ping (useful with ViaVersion on backend).
 });
 
-console.log(`[CraftOnDemand] Listening for Minecraft pings on port ${LISTEN_PORT}...`);
+console.log(`[Proxy] CraftOnDemand proxy listening for Minecraft connections on port ${LISTEN_PORT}.`);
 
 server.on('status', async (client) => {
     const pteroStatus = await getServerStatus();
-    let response = {
-        version: { name: 'CraftOnDemand', protocol: client.protocolVersion },
-        players: { max: 20, online: 0, sample: [] },
-        description: { text: 'Pinging server...' }
+    let serverListResponse = {
+        version: { name: 'CraftOnDemand', protocol: client.protocolVersion }, // Use client's protocol
+        players: { max: 20, online: 0, sample: [] }, // Default values
+        description: { text: 'Pinging server...' }    // Default description
     };
 
     if (pteroStatus === 'running') {
         try {
-            const realStatus = await mc.ping({ host: MINECRAFT_SERVER_HOST, port: parseInt(MINECRAFT_SERVER_PORT), timeout: 2500 });
-            response = realStatus;
-            isStarting = false;
+            // Ping the actual Minecraft server to get its current status.
+            const realStatus = await mc.ping({
+                host: MINECRAFT_SERVER_HOST,
+                port: parseInt(MINECRAFT_SERVER_PORT),
+                timeout: 2500 // Short timeout for quick check.
+            });
+            serverListResponse = realStatus; // Use the real server's response.
+            isStarting = false; // Reset starting flag if server is confirmed running.
+            startTime = null;   // Clear start time.
         } catch (pingError) {
-            response.description.text = '§cServer is unresponsive\n§eJoin to attempt a restart';
+            // The server is reported as 'running' by Pterodactyl but is not responding to pings.
+            serverListResponse.description.text = '§cServer is unresponsive.\n§eJoin to attempt a restart.';
+            console.warn(`[Proxy] Server ${PTERO_SERVER_ID} is 'running' but unresponsive to ping at ${MINECRAFT_SERVER_HOST}:${MINECRAFT_SERVER_PORT}.`);
         }
     } else if (pteroStatus === 'starting') {
         const minutesStarting = startTime ? Math.floor((Date.now() - startTime) / (1000 * 60)) : 0;
-        response.description.text = `§6Server is starting...\n§7Almost there! (Started ${minutesStarting} min ago)`;
+        serverListResponse.description.text = `§6Server is starting...\n§7Nearly there! (Started ${minutesStarting} min ago)`;
     } else if (pteroStatus === 'stopping') {
-        response.description.text = '§cServer is stopping...\n§7Please wait before trying again.';
-    } else {
-        response.description.text = '§aServer is Offline\n§eJoin to start it!';
+        serverListResponse.description.text = '§cServer is stopping...\n§7Please wait a moment before trying again.';
+    } else if (pteroStatus === 'offline') {
+        serverListResponse.description.text = '§aServer is Offline.\n§eJoin to start it!';
+    } else { // Includes 'error' or any other unexpected state
+        serverListResponse.description.text = '§cServer status is unknown or an error occurred.\n§7Please try again shortly.';
+        console.error(`[Proxy] Pterodactyl server status for ${PTERO_SERVER_ID} is: ${pteroStatus}.`);
     }
 
-    client.write('server_info', response);
+    client.write('server_info', serverListResponse);
 });
 
-// Responde correctamente al paquete de ping del cliente para evitar el error de protocolo de red
+// Correctly respond to the client's ping packet to prevent network protocol errors during server list refresh.
 server.on('ping', (client, packet) => {
     client.write('pong', { payload: packet.payload });
 });
 
-// This event is fired when a client attempts to fully log in
+// This event is triggered when a client attempts a full login to the proxy.
 server.on('login', async (client) => {
     const clientAddress = client.socket.remoteAddress;
     const clientPort = client.socket.remotePort;
-    console.log(`[Server] Login attempt from ${clientAddress}:${clientPort} (username: ${client.username}, version: ${client.protocolVersion})`);
+    console.log(`[Proxy] Login attempt from ${clientAddress}:${clientPort} (username: ${client.username}, version: ${client.protocolVersion}).`);
 
     const pteroStatus = await getServerStatus();
-    console.log(`[Pterodactyl] Server status is: ${pteroStatus}`);
+    console.log(`[Pterodactyl] Server ${PTERO_SERVER_ID} status is: ${pteroStatus}.`);
 
-    // Determine the effective status of the server
+    // Determine the effective operational status of the server.
     let isEffectivelyRunning = false;
     if (pteroStatus === 'running') {
         try {
-            // A quick ping is enough to check for a completely dead process.
+            // A quick ping can help detect if the server process is alive but unresponsive (zombie).
             await mc.ping({ host: MINECRAFT_SERVER_HOST, port: parseInt(MINECRAFT_SERVER_PORT), timeout: 2500 });
             isEffectivelyRunning = true;
+            startTime = null; // Clear start time if server is running.
         } catch (e) {
-            console.log('[Server] Server is unresponsive (zombie). Treating as offline to trigger a start.');
-            isEffectivelyRunning = false;
+            console.warn(`[Proxy] Server ${PTERO_SERVER_ID} reported as 'running' by Pterodactyl, but is unresponsive. Treating as offline to trigger a start/restart.`);
+            isEffectivelyRunning = false; // Treat as offline to allow a start attempt.
         }
     }
 
-    // --- Act based on the effective status ---
+    // --- Act based on the effective server status ---
 
     if (isEffectivelyRunning) {
-        // El servidor está encendido, avisamos al usuario que debe conectarse directamente
-        client.end({ text: '§a¡El servidor ya está encendido!\n§eConéctate directamente a: emerald.magmanode.com:31435' });
+        // The server is running; instruct the user to connect directly.
+        const connectTo = `${MINECRAFT_SERVER_HOST}:${MINECRAFT_SERVER_PORT}`;
+        const message = { text: `§aThe server is now online!\n§ePlease connect directly to: ${connectTo}` };
+        client.end(JSON.stringify(message));
+        console.log(`[Proxy] Instructed ${client.username} to connect directly to ${connectTo}.`);
         return;
     }
 
-    // --- Handle server start logic if not running ---
-    if (pteroStatus === 'offline' || pteroStatus === 'running' /* and is a zombie */) {
+    // --- Handle server start logic if it's not effectively running ---
+    // This includes 'offline' or 'running' (but unresponsive/zombie).
+    if (pteroStatus === 'offline' || (pteroStatus === 'running' && !isEffectivelyRunning)) {
         if (!isStarting) {
             isStarting = true;
-            startTime = Date.now();
-            console.log('[Server] Server is offline/unresponsive. Starting now due to login attempt...');
-            await startServer();
-            const message = pteroStatus === 'running'
-                ? { text: '§cServer was unresponsive. §eA restart has been triggered. Please join again in a moment.' }
-                : { text: '§eServer is starting up! §aPlease refresh and join again in a moment.' };
-            client.end(message);
-            setTimeout(() => { isStarting = false; }, 30000);
+            startTime = Date.now(); // Record the time the start sequence was initiated.
+            console.log(`[Proxy] Server ${PTERO_SERVER_ID} is ${pteroStatus === 'offline' ? 'offline' : 'unresponsive'}. Attempting to start it now due to login from ${client.username}.`);
+
+            const startSuccessful = await startServer();
+            let messageText;
+
+            if (startSuccessful) {
+                messageText = pteroStatus === 'running' // Was unresponsive
+                    ? '§cThe server was unresponsive. §eA restart has been triggered. Please refresh and try joining again in a moment.'
+                    : '§eThe server is starting up! §aPlease refresh your server list and try joining again in a moment.';
+            } else {
+                messageText = '§cCould not send start command to the server. §7Please try again later or contact an administrator.';
+                isStarting = false; // Reset flag as start command failed.
+                startTime = null;
+            }
+            client.end(JSON.stringify({ text: messageText }));
+
+            // Reset the 'isStarting' flag after a delay to allow the server time to boot
+            // and prevent immediate subsequent start attempts if the first one is slow or fails silently.
+            // This timeout should ideally be configurable or smarter.
+            if(startSuccessful) {
+                setTimeout(() => {
+                    isStarting = false;
+                    // We don't clear startTime here, as the server might still be in its 'starting' phase.
+                    // startTime is cleared when the server is confirmed 'running' or if a new start is initiated.
+                    console.log(`[Proxy] 'isStarting' flag automatically reset for server ${PTERO_SERVER_ID}.`);
+                }, 30000); // 30 seconds
+            }
         } else {
-            client.end({ text: '§6Server is already starting! §7Please wait...' });
+            // Server is already in the process of starting.
+            const minutesStarting = startTime ? Math.floor((Date.now() - startTime) / (1000 * 60)) : 0;
+            client.end(JSON.stringify({ text: `§6The server is already starting up! §7Please wait. (Attempt initiated ${minutesStarting} min ago)` }));
         }
         return;
     }
 
-    // Handle other states like 'starting', 'stopping', 'error'
-    let disconnectMessage = { text: '§cThe server is currently unavailable.' };
+    // Handle other Pterodactyl states like 'starting', 'stopping', or 'error'.
+    let disconnectMessageObject = { text: '§cThe server is currently unavailable. Please try again shortly.' }; // Default message
     if (pteroStatus === 'starting') {
         const minutesStarting = startTime ? Math.floor((Date.now() - startTime) / (1000 * 60)) : 0;
-        disconnectMessage = { text: `§6Server is starting up! Please wait. (Started ${minutesStarting} min ago)` };
+        disconnectMessageObject = { text: `§6The server is currently starting up! §7Please wait. (Started ${minutesStarting} min ago)` };
     } else if (pteroStatus === 'stopping') {
-        disconnectMessage = { text: '§cServer is stopping. Please wait before trying again.' };
+        disconnectMessageObject = { text: '§cThe server is currently stopping. §7Please wait a moment before trying to connect again.' };
     } else if (pteroStatus === 'error') {
-        disconnectMessage = { text: '§cError communicating with Pterodactyl API.\n§7Please contact an administrator.' };
+        disconnectMessageObject = { text: '§cThere was an error retrieving the server status from the panel.\n§7Please try again later or contact an administrator.' };
     }
-    console.log(`[Server] Disconnecting ${clientAddress}:${clientPort}. Server is ${pteroStatus}.`);
-    client.end(disconnectMessage);
+
+    console.log(`[Proxy] Disconnecting ${client.username} from ${clientAddress}:${clientPort}. Server ${PTERO_SERVER_ID} is ${pteroStatus}.`);
+    client.end(JSON.stringify(disconnectMessageObject));
 });
 
-server.on('error', (error) => console.error('[Server] An error occurred:', error));
-server.on('listening', () => console.log('[Server] Minecraft listener is fully operational.'));
+server.on('error', (error) => {
+    console.error('[Proxy] An error occurred in the proxy server:', error);
+});
+
+server.on('listening', () => {
+    console.log(`[Proxy] Proxy server is now fully operational and listening on port ${LISTEN_PORT}.`);
+});
