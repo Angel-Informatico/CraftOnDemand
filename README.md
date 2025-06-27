@@ -6,7 +6,7 @@
 
 ## 🚀 What is CraftOnDemand?
 
-**CraftOnDemand** is a Node.js-based utility designed to automatically start your **Pterodactyl-hosted Minecraft server** whenever a player pings or tries to connect. Ideal for saving resources while still providing on-demand availability!
+**CraftOnDemand** is a Node.js-based utility designed to automatically start your **Pterodactyl-hosted Minecraft server** whenever a player tries to connect. Ideal for saving resources while still providing on-demand availability!
 
 ---
 
@@ -64,6 +64,7 @@ PTERO_API_KEY=XXXXXXXXXXXXXXXXXXXXXXXXXXXX
 PTERO_SERVER_ID=12345678-90ab-cdef-1234-567890abcdef
 MINECRAFT_SERVER_HOST=127.0.0.1
 MINECRAFT_SERVER_PORT=25566
+MINECRAFT_SERVER_ONLINE_MODE=true
 </code>
 
 ---
